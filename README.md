@@ -1,6 +1,6 @@
-# kali-mcp
+# kali-mcp — Kali Linux as an MCP server (Playwright Firefox automation)
 
-**Turn a Kali box into an MCP server** — expose system info, network recon, and (optionally) full remote control to any MCP-capable AI: opencode, Claude Desktop, Claude mobile (via HTTP tunnel), Cline, and others.
+**Turn a Kali Linux box into an MCP server** — expose system info, network recon, remote control, and persistent Playwright Firefox browser automation to any MCP-capable AI: opencode, Claude Desktop, Claude mobile (via HTTP tunnel), Cline, and others.
 
 No Docker, no containers, no cloud account to set up — just a Python virtualenv and a handful of native packages. Clone it, run one script, and your machine is talking to Claude in minutes.
 
