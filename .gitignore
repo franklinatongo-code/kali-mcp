@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+backup/
+.pin
+.token
+.tunnel-url
+*.log
+*.pid
+.kali-mcp.pid
+.cloudflared.pid
