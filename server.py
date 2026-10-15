@@ -500,6 +500,17 @@ def _bw_cur():
     return None
 
 
+# Dark UI + dark web content by default (playwright.cfg's
+# ui.systemUsesDarkTheme alone only hints the chrome — content follows the
+# context color scheme, so both are forced here; survives browser updates).
+_BW_DARK_PREFS = {
+    "ui.systemUsesDarkTheme": 1,
+    "browser.theme.content-theme": 1,
+    "browser.theme.toolbar-theme": 1,
+    "layout.css.prefers-color-scheme.content-override": 0,
+}
+
+
 async def _bw_ensure(headless: bool = False, timeout: int = 30):
     """Launch the persistent browser if needed. Returns (page, error_dict)."""
     global _bw_play, _bw_browser, _bw_context, _bw_pages, _bw_current, _bw_headless
@@ -531,9 +542,11 @@ async def _bw_ensure(headless: bool = False, timeout: int = 30):
                     headless=bool(headless),
                     env=_bw_gui_env(),
                     timeout=30000,
+                    firefox_user_prefs=_BW_DARK_PREFS,
                 )
                 _bw_context = await _bw_browser.new_context(
                     viewport={"width": 1280, "height": 720},
+                    color_scheme="dark",
                 )
             await _asyncio.wait_for(_launch(), timeout=max(10, min(int(timeout or 30), 120)))
             _bw_headless = bool(headless)
