@@ -2,7 +2,18 @@
 
 **Turn a Kali box into an MCP server** — expose system info, network recon, and (optionally) full remote control to any MCP-capable AI: opencode, Claude Desktop, Claude mobile (via HTTP tunnel), Cline, and others.
 
+No Docker, no containers, no cloud account to set up — just a Python virtualenv and a handful of native packages. Clone it, run one script, and your machine is talking to Claude in minutes.
+
 > ⚠️ **Security status: PIN gate currently DISABLED.** The `terminal`, `open_app`, `screenshot`, `notify`, `clipboard`, `media`, and `lock_screen` tools are open — anyone with the server URL has full control of this machine. See [Security status](#-security-status) before exposing this publicly.
+
+---
+
+## Why kali-mcp
+
+- **Lightweight.** No Docker, no VM, no heavyweight runtime — a Python venv and a few CLI tools you already have on a Linux desktop.
+- **Fast to stand up.** One script (`start-https.sh`) starts the server *and* the public tunnel, and prints everything you need to paste into Claude.
+- **Works from your phone.** Once it's running, Claude mobile can read your system state, scan your LAN, launch apps, take screenshots, and more — all through a normal chat.
+- **Built for Kali.** Ships with the recon and forensics tooling already on the box in mind — `nmap_quick`, `net_status`, `wifi_scan` — not a generic shell wrapper.
 
 ---
 
