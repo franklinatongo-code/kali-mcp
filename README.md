@@ -4,7 +4,7 @@
 
 No Docker, no containers, no cloud account to set up — just a Python virtualenv and a handful of native packages. Clone it, run one script, and your machine is talking to Claude in minutes.
 
-> ⚠️ **Security status: PIN gate currently DISABLED.** The `terminal`, `open_app`, `screenshot`, `notify`, `clipboard`, `media`, and `lock_screen` tools are open — anyone with the server URL has full control of this machine. See [Security status](#-security-status) before exposing this publicly.
+> **Security status: PIN gate currently DISABLED.** The `terminal`, `open_app`, `screenshot`, `notify`, `clipboard`, `media`, and `lock_screen` tools are open — anyone with the server URL has full control of this machine. See [Security status](#security-status) before exposing this publicly.
 
 ---
 
@@ -27,25 +27,25 @@ No Docker, no containers, no cloud account to set up — just a Python virtualen
 | `nmap_quick` | Fast nmap scan — **LAN-only**, public IPs refused | Read-only |
 | `list_desktop_projects` | Lists `~/Desktop` AI projects | Read-only |
 | `list_apps` | Installed GUI apps | Read-only |
-| `terminal` | Run any shell command as the desktop user | ⚠️ Open (PIN disabled) |
-| `open_app` | Launch any GUI app by fuzzy name | ⚠️ Open (PIN disabled) |
-| `screenshot` | Capture the screen as an image | ⚠️ Open |
-| `notify` | Desktop notification | ⚠️ Open |
-| `clipboard` | Read / write the clipboard | ⚠️ Open |
-| `media` | Play-pause / next / previous / volume | ⚠️ Open |
-| `lock_screen` | Lock the PC | ⚠️ Open |
-| `browser_open` | Go to a URL (starts persistent Firefox session if needed, visible by default) | ⚠️ Open |
-| `browser_click` | Click element by CSS/XPath selector or visible text | ⚠️ Open |
-| `browser_type` | Type into a field, optional Enter to submit | ⚠️ Open |
-| `browser_read` | Visible page/element text (prefer this over screenshots) | ⚠️ Open |
-| `browser_screenshot` | Current page as PNG (only when asked) | ⚠️ Open |
-| `browser_eval` | Run JavaScript on the page, return result | ⚠️ Open |
-| `browser_tabs` | List / switch / close / open tabs | ⚠️ Open |
-| `browser_close` | Shut the browser session down | ⚠️ Open |
+| `terminal` | Run any shell command as the desktop user | Open (PIN disabled) |
+| `open_app` | Launch any GUI app by fuzzy name | Open (PIN disabled) |
+| `screenshot` | Capture the screen as an image | Open |
+| `notify` | Desktop notification | Open |
+| `clipboard` | Read / write the clipboard | Open |
+| `media` | Play-pause / next / previous / volume | Open |
+| `lock_screen` | Lock the PC | Open |
+| `browser_open` | Go to a URL (starts persistent Firefox session if needed, visible by default) | Open |
+| `browser_click` | Click element by CSS/XPath selector or visible text | Open |
+| `browser_type` | Type into a field, optional Enter to submit | Open |
+| `browser_read` | Visible page/element text (prefer this over screenshots) | Open |
+| `browser_screenshot` | Current page as PNG (only when asked) | Open |
+| `browser_eval` | Run JavaScript on the page, return result | Open |
+| `browser_tabs` | List / switch / close / open tabs | Open |
+| `browser_close` | Shut the browser session down | Open |
 
 ---
 
-## 🔒 Security status
+## Security status
 
 The control PIN that gates the remote-control tools is **disabled** in `server.py` (`_need_pin` returns `None`). That means:
 
@@ -177,7 +177,7 @@ Claude's Add-connector dialog with **Sign in now** only speaks OAuth, not static
 
 In the dialog: **No sign-in** + `authorization: Bearer <token>` under Request headers — *if* your org has that beta. Otherwise **Sign in now** (auto-approves, no password).
 
-> ⚠️ **Trade-off:** OAuth registration is OPEN — anyone holding the URL can complete the flow and use **all** tools (PIN currently disabled). The random tunnel URL is the only secrecy. Never share it; kill the tunnel (`./kali-mcp.sh stop`) when not in use.
+> **Trade-off:** OAuth registration is OPEN — anyone holding the URL can complete the flow and use **all** tools (PIN currently disabled). The random tunnel URL is the only secrecy. Never share it; kill the tunnel (`./kali-mcp.sh stop`) when not in use.
 
 ---
 
@@ -191,7 +191,7 @@ Example prompts: *"open firefox"* · *"run `df -h`"* · *"screenshot my screen"*
 - `terminal` runs as your user (not root), 10–300s timeout, output truncated, and refuses catastrophic typos (`rm -rf /`, `mkfs`, `dd … of=/dev/…`, fork bombs).
 - Needs your graphical session — works when launched from the desktop; screenshots use `grim`, clipboard uses `wl-copy` / `wl-paste`.
 
-> ⚠️ These tools behind the public tunnel + open OAuth mean **anyone with the URL controls the PC** (PIN disabled). Never share the URL; prefer Tailscale / a named tunnel for permanent access.
+> These tools behind the public tunnel + open OAuth mean **anyone with the URL controls the PC** (PIN disabled). Never share the URL; prefer Tailscale / a named tunnel for permanent access.
 
 ---
 
