@@ -533,6 +533,17 @@ async def _bw_ensure(headless: bool = False, timeout: int = 30):
         except Exception:  # noqa: BLE001
             pass
         _bw_play = None
+    # Recover if the browser process died out from under us.
+    if _bw_browser is not None and not _bw_browser.is_connected():
+        _bw_browser = None
+        _bw_context = None
+        _bw_pages = []
+        _bw_current = -1
+        try:
+            await _bw_play.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        _bw_play = None
     if _bw_browser is None:
         try:
             async def _launch():
