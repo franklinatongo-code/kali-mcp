@@ -220,4 +220,58 @@ Example prompts: *"open youtube.com and search atongo zimba"* · *"read me this 
 
 ## License
 
-No license specified yet — all rights reserved by default until one is added.
+MIT — see [LICENSE](LICENSE). Free for personal and commercial use.
+
+---
+
+## How is this different from other Kali MCP servers?
+
+Most Kali MCP servers run in Docker, wrap pentest CLIs, and stop there.
+kali-mcp is the opposite bet: no containers, your real desktop, and a
+**visible browser the AI actually drives**:
+
+| | kali-mcp | Typical Docker-based Kali MCP |
+|---|---|---|
+| Setup | venv + one script, runs on your desktop | Docker image + container networking |
+| Browser automation | Persistent **visible** Playwright Firefox (watch it work, dark theme) | Headless-only or none |
+| Phone control | Full desktop remote control via tunnel (apps, screenshots, media, lock) | Rarely / terminal-only |
+| Claude mobile | Public HTTPS tunnel + auto-approve OAuth out of the box | Bring your own tunnel/auth |
+| Recon | `nmap_quick` (LAN-only guard), `wifi_scan`, `net_status` | Broader pentest suites (sqlmap, hydra, metasploit…) |
+
+If you want a full pentest arsenal in a sandbox, pick one of those. If you
+want your own Kali desktop — browser included — remote-controlled from a
+Claude chat on your phone, this is it.
+
+---
+
+## FAQ
+
+**How do I connect Claude to my Kali Linux machine?**
+Run `./start-https.sh`, copy the public `https://.../mcp` URL into Claude as
+a custom connector (Streamable HTTP, Sign in now — it auto-approves), done.
+No port-forwarding, no account.
+
+**How do I let an AI control my Firefox?**
+That's the `browser_*` tools: `browser_open` launches a persistent Playwright
+Firefox you can watch on screen, then `browser_click`, `browser_type`,
+`browser_read`, `browser_eval` drive it across calls. Pass `headless=true`
+for an invisible instance.
+
+**Can Claude use my computer from my phone?**
+Yes — that's the main use case. With the tunnel up, Claude mobile can run
+terminal commands, open apps, screenshot the screen, control media, and drive
+the browser, all from chat.
+
+**Does it work on Hyprland / Wayland?**
+Yes — built on it. Visible windows, screenshots (`grim`), clipboard
+(`wl-copy`/`wl-paste`) and notifications (`swaync`) are all Wayland-native.
+
+**Does it touch my normal Firefox profile or logins?**
+No — the automated browser uses an ephemeral Playwright profile. Your
+`~/.mozilla` profile is never opened or modified.
+
+**Is it safe to expose publicly?**
+Only with eyes open: the PIN gate is currently disabled, so the tunnel URL
+alone grants full control. Never share the URL, stop the tunnel when idle
+(`./kali-mcp.sh stop`), and prefer Tailscale or a named Cloudflare tunnel
+for anything permanent. See [Security status](#security-status).
