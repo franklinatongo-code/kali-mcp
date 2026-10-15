@@ -34,6 +34,14 @@ No Docker, no containers, no cloud account to set up — just a Python virtualen
 | `clipboard` | Read / write the clipboard | ⚠️ Open |
 | `media` | Play-pause / next / previous / volume | ⚠️ Open |
 | `lock_screen` | Lock the PC | ⚠️ Open |
+| `browser_open` | Go to a URL (starts persistent Firefox session if needed, visible by default) | ⚠️ Open |
+| `browser_click` | Click element by CSS/XPath selector or visible text | ⚠️ Open |
+| `browser_type` | Type into a field, optional Enter to submit | ⚠️ Open |
+| `browser_read` | Visible page/element text (prefer this over screenshots) | ⚠️ Open |
+| `browser_screenshot` | Current page as PNG (only when asked) | ⚠️ Open |
+| `browser_eval` | Run JavaScript on the page, return result | ⚠️ Open |
+| `browser_tabs` | List / switch / close / open tabs | ⚠️ Open |
+| `browser_close` | Shut the browser session down | ⚠️ Open |
 
 ---
 
@@ -59,8 +67,15 @@ The control PIN that gates the remote-control tools is **disabled** in `server.p
 ```bash
 sudo apt install cloudflared grim wl-clipboard libnotify-bin swaync playerctl
 python3 -m venv .venv
-.venv/bin/pip install "mcp" uvicorn starlette
+.venv/bin/pip install "mcp" uvicorn starlette "playwright==1.64.0"
 ./start-https.sh   # starts server + tunnel, prints a fresh Public URL + token
+```
+
+Then download Playwright's Firefox (one-time, lands in `~/.cache/ms-playwright`,
+nothing to do with your normal Firefox):
+
+```bash
+.venv/bin/python -m playwright install firefox
 ```
 
 Hyprland users: notifications need a daemon running —
@@ -88,6 +103,7 @@ add `exec-once = swaync` to `~/.config/hypr/hyprland.conf`.
 ./kali-mcp.sh logs | ./kali-mcp.sh tunnel-log
 ./kali-mcp.sh stop                           # stops server AND tunnel
 ./kali-mcp.sh restart --tunnel               # bounce both (new tunnel URL!)
+./kali-mcp.sh pin                            # show control PIN (gate disabled, unused)
 ```
 
 **Typical Claude-ready session:**
@@ -176,6 +192,20 @@ Example prompts: *"open firefox"* · *"run `df -h`"* · *"screenshot my screen"*
 - Needs your graphical session — works when launched from the desktop; screenshots use `grim`, clipboard uses `wl-copy` / `wl-paste`.
 
 > ⚠️ These tools behind the public tunnel + open OAuth mean **anyone with the URL controls the PC** (PIN disabled). Never share the URL; prefer Tailscale / a named tunnel for permanent access.
+
+---
+
+## Browser automation (currently OPEN, no PIN)
+
+One persistent Playwright Firefox session shared between calls — `browser_open` launches it once, later calls reuse it, `browser_close` shuts it down. Ephemeral profile: never touches your normal Firefox or its logins.
+
+`browser_open(url)` (visible window by default, `headless=true` for no window) → `browser_click` / `browser_type(selector, text, press_enter=true)` → `browser_read` (page text, preferred) → `browser_screenshot` (only when asked) → `browser_eval(js)` → `browser_tabs` (list/switch/close/new) → `browser_close`.
+
+Example prompts: *"open youtube.com and search atongo zimba"* · *"read me this page"* · *"click the first result"* · *"what does this page say in JS: document.title"*.
+
+- Returns plain text wherever possible (token-cheap); images only via `browser_screenshot`.
+- Every call has timeouts and never hangs; errors are plain messages (e.g. `no browser session — call browser_open(url) first`).
+- Needs the graphical session for visible windows (Hyprland/Wayland: `MOZ_ENABLE_WAYLAND=1` is set automatically).
 
 ---
 

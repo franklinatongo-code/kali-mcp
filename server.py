@@ -221,11 +221,10 @@ DENY_RES = (
 
 @mcp.tool()
 def terminal(command: str, pin: str = "", timeout: int = 60, workdir: str = "") -> dict:
-    """Run a shell command on the PC and return its output. NEEDS control PIN.
+    """Run a shell command on the PC and return its output.
 
     Args:
         command: bash command to run (as the desktop user, NOT root).
-        pin: control PIN (see server log / .pin file / kali-mcp.sh pin).
         timeout: seconds (10-300, default 60).
         workdir: optional working directory (default: home).
     """
@@ -303,7 +302,7 @@ def _norm(s: str) -> str:
 
 @mcp.tool()
 def list_apps(search: str = "") -> dict:
-    """List installed GUI apps (name + launch command). Read-only, no PIN.
+    """List installed GUI apps (name + launch command). Read-only.
 
     Args:
         search: optional fuzzy filter, e.g. 'fire', 'file manager'.
@@ -327,11 +326,10 @@ def list_apps(search: str = "") -> dict:
 
 @mcp.tool()
 def open_app(query: str, pin: str = "") -> dict:
-    """Open/launch a GUI app on the PC. NEEDS control PIN.
+    """Open/launch a GUI app on the PC.
 
     Args:
         query: fuzzy app name, e.g. 'firefox', 'files', 'terminal', 'code'.
-        pin: control PIN.
     """
     bad = _need_pin(pin)
     if bad:
@@ -372,10 +370,9 @@ def open_app(query: str, pin: str = "") -> dict:
 
 @mcp.tool()
 def screenshot(pin: str = "", max_width: int = 1280):
-    """Take a screenshot of the PC display. NEEDS control PIN. Returns a PNG image.
+    """Take a screenshot of the PC display. Returns a PNG image.
 
     Args:
-        pin: control PIN.
         max_width: downscale to this width (default 1280, keeps phone-sized replies fast).
     """
     from mcp.types import ImageContent, TextContent
@@ -411,7 +408,7 @@ def screenshot(pin: str = "", max_width: int = 1280):
 
 @mcp.tool()
 def notify(title: str, message: str = "", pin: str = "") -> dict:
-    """Pop a desktop notification on the PC. NEEDS control PIN (anti-spam).
+    """Pop a desktop notification on the PC.
 
     Needs a notification daemon in the desktop session; errors clearly if none.
     """
@@ -431,10 +428,10 @@ def notify(title: str, message: str = "", pin: str = "") -> dict:
 
 @mcp.tool()
 def clipboard(text: str = "", pin: str = "") -> dict:
-    """Read (no text) or set the PC clipboard. Setting NEEDS control PIN.
+    """Read (no text) or set the PC clipboard.
 
     Args:
-        text: if given, copies it to the clipboard (needs PIN); if empty, reads it.
+        text: if given, copies it to the clipboard; if empty, reads it.
     """
     if text:
         bad = _need_pin(pin)
@@ -453,7 +450,7 @@ def clipboard(text: str = "", pin: str = "") -> dict:
 
 @mcp.tool()
 def media(action: str, pin: str = "") -> dict:
-    """Media keys on the PC: play-pause, next, previous, stop, volume-up, volume-down. NEEDS PIN."""
+    """Media keys on the PC: play-pause, next, previous, stop, volume-up, volume-down."""
     bad = _need_pin(pin)
     if bad:
         return bad
@@ -467,11 +464,452 @@ def media(action: str, pin: str = "") -> dict:
 
 @mcp.tool()
 def lock_screen(pin: str = "") -> dict:
-    """Lock the PC screen. NEEDS control PIN."""
+    """Lock the PC screen."""
     bad = _need_pin(pin)
     if bad:
         return bad
     return _run(["loginctl", "lock-session"])
+
+
+# ── browser-control tools (PIN-gated, persistent Playwright Firefox) ────
+# One persistent session between calls: browser_open() launches once,
+# later calls reuse the same browser/context. Never touches the normal
+# Firefox profile (~/.mozilla) — uses Playwright's ephemeral context.
+# Async tools share the server event loop, so the session stays alive.
+import asyncio as _asyncio
+
+_bw_play = None        # async_playwright() instance
+_bw_browser = None     # firefox browser
+_bw_context = None     # single browser context (ephemeral, no login persistence)
+_bw_pages: list = []   # tabs (Playwright pages), in open order
+_bw_current: int = -1  # index into _bw_pages
+_bw_headless: bool | None = None
+_bw_lock = _asyncio.Lock()
+
+
+def _bw_gui_env() -> dict:
+    env = _gui_env()
+    env.setdefault("MOZ_ENABLE_WAYLAND", "1")
+    return env
+
+
+def _bw_cur():
+    """Current page or None."""
+    if 0 <= _bw_current < len(_bw_pages):
+        return _bw_pages[_bw_current]
+    return None
+
+
+async def _bw_ensure(headless: bool = False, timeout: int = 30):
+    """Launch the persistent browser if needed. Returns (page, error_dict)."""
+    global _bw_play, _bw_browser, _bw_context, _bw_pages, _bw_current, _bw_headless
+    try:
+        from playwright.async_api import async_playwright
+    except Exception as e:  # noqa: BLE001
+        return None, {"ok": False, "error": f"playwright not installed in kali-mcp .venv: {e}"}
+    # Restart if caller wants a different headless mode than running.
+    if _bw_browser is not None and _bw_headless is not None and _bw_headless != bool(headless):
+        try:
+            await _bw_browser.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _bw_browser = None
+        _bw_context = None
+        _bw_pages = []
+        _bw_current = -1
+        try:
+            await _bw_play.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        _bw_play = None
+    if _bw_browser is None:
+        try:
+            async def _launch():
+                global _bw_play, _bw_browser, _bw_context
+                _bw_play = await async_playwright().start()
+                _bw_browser = await _bw_play.firefox.launch(
+                    headless=bool(headless),
+                    env=_bw_gui_env(),
+                    timeout=30000,
+                )
+                _bw_context = await _bw_browser.new_context(
+                    viewport={"width": 1280, "height": 720},
+                )
+            await _asyncio.wait_for(_launch(), timeout=max(10, min(int(timeout or 30), 120)))
+            _bw_headless = bool(headless)
+        except _asyncio.TimeoutError:
+            return None, {"ok": False, "error": "browser launch timed out"}
+        except Exception as e:  # noqa: BLE001
+            return None, {"ok": False, "error": f"browser launch failed: {str(e)[:400]}"}
+    page = _bw_cur()
+    if page is None:
+        try:
+            page = await _bw_context.new_page()
+            _bw_pages.append(page)
+            _bw_current = len(_bw_pages) - 1
+        except Exception as e:  # noqa: BLE001
+            return None, {"ok": False, "error": f"new tab failed: {str(e)[:300]}"}
+    return page, None
+
+
+async def _bw_info(page) -> dict:
+    try:
+        return {"url": page.url, "title": (await page.title())[:300]}
+    except Exception:  # noqa: BLE001
+        return {"url": "", "title": ""}
+
+
+async def _bw_try_click(page, selector: str, timeout_ms: int) -> dict:
+    """Click by CSS/XPath first, then by visible text. Returns result dict."""
+    sel = (selector or "").strip()
+    if not sel:
+        return {"ok": False, "error": "empty selector"}
+    errs = []
+    # 1. CSS / XPath / Playwright selector directly.
+    try:
+        loc = page.locator(sel).first
+        await loc.click(timeout=timeout_ms)
+        return {"ok": True, "via": "selector"}
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"selector: {str(e)[:160]}")
+    # 2. Visible text.
+    try:
+        await page.get_by_text(sel).first.click(timeout=timeout_ms)
+        return {"ok": True, "via": "text"}
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"text: {str(e)[:160]}")
+    # 3. Placeholder (useful for search boxes that are found by hint text).
+    try:
+        await page.get_by_placeholder(sel).first.click(timeout=timeout_ms)
+        return {"ok": True, "via": "placeholder"}
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"placeholder: {str(e)[:160]}")
+    return {"ok": False, "error": "click found nothing: " + " | ".join(errs)[:500]}
+
+
+async def _bw_try_fill(page, selector: str, text: str, timeout_ms: int) -> dict:
+    sel = (selector or "").strip()
+    if not sel:
+        return {"ok": False, "error": "empty selector"}
+    errs = []
+    try:
+        await page.locator(sel).first.fill(text, timeout=timeout_ms)
+        return {"ok": True, "via": "selector"}
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"selector: {str(e)[:160]}")
+    try:
+        await page.get_by_placeholder(sel).first.fill(text, timeout=timeout_ms)
+        return {"ok": True, "via": "placeholder"}
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"placeholder: {str(e)[:160]}")
+    try:
+        await page.get_by_label(sel).first.fill(text, timeout=timeout_ms)
+        return {"ok": True, "via": "label"}
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"label: {str(e)[:160]}")
+    return {"ok": False, "error": "type found nothing: " + " | ".join(errs)[:500]}
+
+
+@mcp.tool()
+async def browser_open(url: str, headless: bool = False, pin: str = "", timeout: int = 30) -> dict:
+    """Start the persistent browser session if needed and go to the URL.
+
+    Args:
+        url: page to open (https:// added if missing).
+        headless: False = visible window (default), True = no window.
+        timeout: seconds (10-120, default 30).
+    """
+    bad = _need_pin(pin)
+    if bad:
+        return bad
+    timeout = max(10, min(int(timeout or 30), 120))
+    url = (url or "").strip()
+    if not url:
+        return {"ok": False, "error": "empty url"}
+    if "://" not in url:
+        url = "https://" + url
+    async with _bw_lock:
+        page, err = await _bw_ensure(headless=headless, timeout=timeout)
+        if err:
+            return err
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"goto failed: {str(e)[:300]}", "url": url}
+        info = await _bw_info(page)
+        return {"ok": True, "url": info["url"], "title": info["title"],
+                "headless": _bw_headless, "tabs": len(_bw_pages), "current": _bw_current}
+
+
+@mcp.tool()
+async def browser_click(selector: str, pin: str = "", timeout: int = 10) -> dict:
+    """Click an element by CSS/XPath selector or by its visible text.
+
+    Args:
+        selector: CSS/XPath (e.g. 'a#video-title', 'input[name=search]') or text ('Accept all').
+        timeout: seconds per attempt (default 10).
+    """
+    bad = _need_pin(pin)
+    if bad:
+        return bad
+    timeout_ms = max(1, min(int(timeout or 10), 60)) * 1000
+    async with _bw_lock:
+        page = _bw_cur()
+        if page is None:
+            return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+        r = await _bw_try_click(page, selector, timeout_ms)
+        if not r.get("ok"):
+            return r
+        info = await _bw_info(page)
+        r.update(info)
+        return r
+
+
+@mcp.tool()
+async def browser_type(selector: str, text: str, press_enter: bool = False,
+                       pin: str = "", timeout: int = 10) -> dict:
+    """Type text into a field found by selector, placeholder or label.
+
+    Args:
+        selector: CSS (e.g. "input[name='search_query']") or placeholder/label text.
+        text: text to type (replaces field content).
+        press_enter: press Enter after typing (e.g. submit a search).
+        timeout: seconds (default 10).
+    """
+    bad = _need_pin(pin)
+    if bad:
+        return bad
+    timeout_ms = max(1, min(int(timeout or 10), 60)) * 1000
+    async with _bw_lock:
+        page = _bw_cur()
+        if page is None:
+            return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+        r = await _bw_try_fill(page, selector, text, timeout_ms)
+        if not r.get("ok"):
+            return r
+        if press_enter:
+            try:
+                await page.keyboard.press("Enter")
+                r["pressed_enter"] = True
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": f"typed but Enter failed: {str(e)[:200]}"}
+        info = await _bw_info(page)
+        r.update(info)
+        return r
+
+
+@mcp.tool()
+async def browser_read(selector: str | None = None, pin: str = "",
+                       timeout: int = 10, max_chars: int = 8000) -> dict:
+    """Return visible page text (default) or one element's text. Use this, NOT screenshots.
+
+    Args:
+        selector: None = whole page; else CSS for one element.
+        timeout: seconds (default 10).
+        max_chars: truncate (default 8000).
+    """
+    bad = _need_pin(pin)
+    if bad:
+        return bad
+    timeout_ms = max(1, min(int(timeout or 10), 60)) * 1000
+    max_chars = max(500, min(int(max_chars or 8000), 20000))
+    async with _bw_lock:
+        page = _bw_cur()
+        if page is None:
+            return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+        try:
+            if selector:
+                txt = await page.locator(selector).first.inner_text(timeout=timeout_ms)
+            else:
+                txt = await page.inner_text("body", timeout=timeout_ms)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"read failed: {str(e)[:300]}"}
+        info = await _bw_info(page)
+        txt = (txt or "").strip()[:max_chars]
+        return {"ok": True, "url": info["url"], "title": info["title"], "text": txt,
+                "chars": len(txt)}
+
+
+@mcp.tool()
+async def browser_screenshot(pin: str = "", max_width: int = 800):
+    """Take a PNG of the current page. Only when asked — prefer browser_read.
+
+    Args:
+        max_width: downscale width (default 800, 0 = full size).
+    """
+    from mcp.types import ImageContent
+    bad = _need_pin(pin)
+    if bad:
+        return bad["error"]
+    async with _bw_lock:
+        page = _bw_cur()
+        if page is None:
+            return "no browser session — call browser_open(url) first"
+        try:
+            data = await page.screenshot(full_page=False, timeout=15000)
+        except Exception as e:  # noqa: BLE001
+            return f"page screenshot failed: {e}"[:300]
+    import base64 as _b64
+    import tempfile as _tf
+    tmp = _tf.mktemp(suffix=".png")
+    try:
+        Path(tmp).write_bytes(bytes(data))
+        if max_width and shutil.which("convert"):
+            small = tmp + ".small.png"
+            subprocess.run(["convert", tmp, "-resize", f"{int(max_width)}x>", small],
+                           timeout=15, capture_output=True)
+            if Path(small).is_file():
+                data = Path(small).read_bytes()
+                Path(small).unlink(missing_ok=True)
+        return ImageContent(type="image", data=_b64.b64encode(bytes(data)).decode(),
+                            mimeType="image/png")
+    except Exception as e:  # noqa: BLE001
+        return f"screenshot failed: {e}"[:300]
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+@mcp.tool()
+async def browser_eval(js: str, pin: str = "", timeout: int = 10) -> dict:
+    """Run JavaScript on the page and return the result.
+
+    Args:
+        js: JS snippet, e.g. "document.title" or "() => document.querySelectorAll('a').length".
+        timeout: seconds (default 10).
+    """
+    bad = _need_pin(pin)
+    if bad:
+        return bad
+    js = js or ""
+    if len(js) > 4000:
+        return {"ok": False, "error": "js too long (max 4000 chars)"}
+    async with _bw_lock:
+        page = _bw_cur()
+        if page is None:
+            return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+        try:
+            res = await _asyncio.wait_for(page.evaluate(js),
+                                          timeout=max(1, min(int(timeout or 10), 60)))
+        except _asyncio.TimeoutError:
+            return {"ok": False, "error": "eval timed out"}
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"eval failed: {str(e)[:400]}"}
+    try:
+        txt = json.dumps(res, default=str)[:8000]
+    except Exception:  # noqa: BLE001
+        txt = str(res)[:8000]
+    return {"ok": True, "result": txt}
+
+
+@mcp.tool()
+async def browser_tabs(action: str = "list", index: int | None = None,
+                       url: str = "", pin: str = "") -> dict:
+    """List, switch, close or open tabs in the persistent session.
+
+    Args:
+        action: 'list' (default), 'switch', 'close', 'new'.
+        index: tab index for switch/close.
+        url: URL for 'new' (blank tab if empty).
+    """
+    bad = _need_pin(pin)
+    if bad:
+        return bad
+    global _bw_current
+    action = (action or "list").strip().lower()
+    async with _bw_lock:
+        if action == "new":
+            if _bw_context is None:
+                return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+            try:
+                page = await _bw_context.new_page()
+                _bw_pages.append(page)
+                _bw_current = len(_bw_pages) - 1
+                target = (url or "").strip()
+                if target:
+                    if "://" not in target:
+                        target = "https://" + target
+                    await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+                info = await _bw_info(page)
+                return {"ok": True, "opened": _bw_current, "url": info["url"],
+                        "title": info["title"], "tabs": len(_bw_pages)}
+            except Exception as e:  # noqa: BLE001
+                return {"ok": False, "error": f"new tab failed: {str(e)[:300]}"}
+        if not _bw_pages:
+            return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+        if action == "list":
+            tabs = []
+            for i, pg in enumerate(_bw_pages):
+                try:
+                    tabs.append({"index": i, "url": pg.url,
+                                 "title": (await pg.title())[:200],
+                                 "current": i == _bw_current})
+                except Exception:  # noqa: BLE001
+                    tabs.append({"index": i, "url": "?", "title": "?",
+                                 "current": i == _bw_current})
+            return {"ok": True, "tabs": tabs, "current": _bw_current}
+        if action in ("switch", "close"):
+            if index is None:
+                return {"ok": False, "error": "index required for switch/close"}
+            try:
+                index = int(index)
+            except Exception:  # noqa: BLE001
+                return {"ok": False, "error": "index must be a number"}
+            if not 0 <= index < len(_bw_pages):
+                return {"ok": False, "error": f"bad index {index} (0-{len(_bw_pages) - 1})"}
+            if action == "switch":
+                _bw_current = index
+                info = await _bw_info(_bw_pages[index])
+                return {"ok": True, "current": index, "url": info["url"], "title": info["title"]}
+            try:
+                await _bw_pages[index].close()
+            except Exception:  # noqa: BLE001
+                pass
+            del _bw_pages[index]
+            if not _bw_pages:
+                _bw_current = -1
+                return {"ok": True, "closed": index, "tabs": 0}
+            _bw_current = max(0, min(_bw_current, len(_bw_pages) - 1))
+            info = await _bw_info(_bw_pages[_bw_current])
+            return {"ok": True, "closed": index, "tabs": len(_bw_pages),
+                    "current": _bw_current, "url": info["url"], "title": info["title"]}
+        return {"ok": False, "error": f"unknown action '{action}' — use list/switch/close/new"}
+
+
+@mcp.tool()
+async def browser_close(pin: str = "") -> dict:
+    """Shut the persistent browser session down."""
+    bad = _need_pin(pin)
+    if bad:
+        return bad
+    global _bw_play, _bw_browser, _bw_context, _bw_pages, _bw_current, _bw_headless
+    async with _bw_lock:
+        n = len(_bw_pages)
+        for pg in _bw_pages:
+            try:
+                await pg.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _bw_pages = []
+        _bw_current = -1
+        if _bw_browser is not None:
+            try:
+                await _bw_browser.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _bw_browser = None
+        _bw_context = None
+        _bw_headless = None
+        if _bw_play is not None:
+            try:
+                await _bw_play.stop()
+            except Exception:  # noqa: BLE001
+                pass
+        _bw_play = None
+        return {"ok": True, "closed_tabs": n}
 
 
 # ── entrypoint ─────────────────────────────────────────────────────────
