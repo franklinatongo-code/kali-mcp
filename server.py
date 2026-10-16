@@ -223,6 +223,13 @@ DENY_RES = (
 def terminal(command: str, pin: str = "", timeout: int = 60, workdir: str = "") -> dict:
     """Run a shell command on the PC and return its output.
 
+    WEB BROWSING RULE: NEVER use this for websites — no xdg-open, no
+    firefox/chrome/chromium launches, no curl-to-read-pages. For ANY web
+    task use browser_open / browser_click / browser_type / browser_read /
+    browser_wait instead: they drive a controlled browser you can actually
+    read back. Terminal-launched browsers are invisible to you and the user
+    will see you claim "still opening" after it already opened.
+
     Args:
         command: bash command to run (as the desktop user, NOT root).
         timeout: seconds (10-300, default 60).
@@ -327,6 +334,10 @@ def list_apps(search: str = "") -> dict:
 @mcp.tool()
 def open_app(query: str, pin: str = "") -> dict:
     """Open/launch a GUI app on the PC.
+
+    NOT FOR WEBSITES: to visit a URL use browser_open(url), never
+    open_app('firefox'/'chrome') + terminal. This is for desktop apps
+    (files, terminal, calculator, ...).
 
     Args:
         query: fuzzy app name, e.g. 'firefox', 'files', 'terminal', 'code'.
@@ -583,6 +594,40 @@ async def _bw_info(page) -> dict:
         return {"url": "", "title": ""}
 
 
+async def _bw_settle(page, url_before: str = "", timeout_ms: int = 5000) -> dict:
+    """Post-action settle wait: give SPAs a tick, then wait for load states.
+
+    Tuned for fast PCs: short initial tick, early exit — typical pages
+    settle in <1s. Returns completion signals the AI can use to check
+    its work: {url, title, url_before, navigated, ready_state,
+    status, elapsed_ms}. Never raises.
+    """
+    import time as _time
+    t0 = _time.monotonic()
+    try:
+        await page.wait_for_timeout(300)
+    except Exception:  # noqa: BLE001
+        pass
+    for state, t in (("domcontentloaded", min(timeout_ms, 5000)), ("networkidle", 2000)):
+        try:
+            await page.wait_for_load_state(state, timeout=t)
+        except Exception:  # noqa: BLE001
+            pass
+    info = await _bw_info(page)
+    try:
+        ready = await page.evaluate("document.readyState")
+    except Exception:  # noqa: BLE001
+        ready = "unknown"
+    url_after = info.get("url", "")
+    ready = str(ready)[:20]
+    return {"url": url_after, "title": info.get("title", ""),
+            "url_before": url_before,
+            "navigated": bool(url_before) and url_before != url_after,
+            "ready_state": ready,
+            "status": "loaded" if ready == "complete" else "loading",
+            "elapsed_ms": int((_time.monotonic() - t0) * 1000)}
+
+
 async def _bw_try_click(page, selector: str, timeout_ms: int) -> dict:
     """Click by CSS/XPath first, then by visible text. Returns result dict."""
     sel = (selector or "").strip()
@@ -638,6 +683,17 @@ async def _bw_try_fill(page, selector: str, text: str, timeout_ms: int) -> dict:
 async def browser_open(url: str, headless: bool = False, pin: str = "", timeout: int = 30) -> dict:
     """Start the persistent browser session if needed and go to the URL.
 
+    USE THIS FOR ALL WEB TASKS — never terminal xdg-open / firefox / chrome
+    / curl for websites. Those leave you blind (you can't read the page) and
+    cause the "still opening" confusion: the PC opens it fast but you can't
+    see it. This tool opens the page AND reports back so you know.
+
+    COMPLETION: waits for domcontentloaded (+ short networkidle, ~2s max)
+    before returning, so url/title/ready_state below are post-load with
+    status="loaded" when document.readyState=="complete". Still, dynamic
+    sites keep rendering afterwards — VERIFY with browser_read(), or
+    browser_wait() if you need specific text to appear.
+
     Args:
         url: page to open (https:// added if missing).
         headless: False = visible window (default), True = no window.
@@ -659,19 +715,39 @@ async def browser_open(url: str, headless: bool = False, pin: str = "", timeout:
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=timeout * 1000)
             try:
-                await page.wait_for_load_state("networkidle", timeout=5000)
+                await page.wait_for_load_state("networkidle", timeout=2500)
             except Exception:  # noqa: BLE001
                 pass
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "error": f"goto failed: {str(e)[:300]}", "url": url}
         info = await _bw_info(page)
+        try:
+            ready = await page.evaluate("document.readyState")
+        except Exception:  # noqa: BLE001
+            ready = "unknown"
+        ready = str(ready)[:20]
         return {"ok": True, "url": info["url"], "title": info["title"],
-                "headless": _bw_headless, "tabs": len(_bw_pages), "current": _bw_current}
+                "headless": _bw_headless, "tabs": len(_bw_pages), "current": _bw_current,
+                "ready_state": ready, "status": "loaded" if ready == "complete" else "loading",
+                "hint": "page loaded — call browser_read() to verify content, "
+                        "browser_wait(text=...) if expected text not there yet"}
 
 
 @mcp.tool()
 async def browser_click(selector: str, pin: str = "", timeout: int = 10) -> dict:
     """Click an element by CSS/XPath selector or by its visible text.
+
+    COMPLETION CHECK (how to know it worked):
+    - This tool auto-waits for navigation/load after the click and returns
+      url_before / url / navigated / ready_state.
+    - ok:true only means "something was clicked", NOT "task done".
+      Always VERIFY: call browser_read() to see the new page state.
+    - If you expected a new page/results but navigated==false, the click
+      probably opened a SPA view or needs more time -> call
+      browser_wait(text="expected text" or url_contains="...") then
+      browser_read() again.
+    - If ok:false, the selector found nothing — call browser_read() to see
+      what IS on the page, then retry with better text/CSS.
 
     Args:
         selector: CSS/XPath (e.g. 'a#video-title', 'input[name=search]') or text ('Accept all').
@@ -685,11 +761,21 @@ async def browser_click(selector: str, pin: str = "", timeout: int = 10) -> dict
         page = _bw_cur()
         if page is None:
             return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+        url_before = ""
+        try:
+            url_before = page.url
+        except Exception:  # noqa: BLE001
+            pass
         r = await _bw_try_click(page, selector, timeout_ms)
         if not r.get("ok"):
+            r["hint"] = "click found nothing — call browser_read() to see page text, then retry"
             return r
-        info = await _bw_info(page)
-        r.update(info)
+        settled = await _bw_settle(page, url_before=url_before)
+        r.update(settled)
+        r["hint"] = ("navigated — call browser_read() to verify new page"
+                     if r.get("navigated") else
+                     "same URL — SPA update or no navigation; call browser_read() to verify, "
+                     "browser_wait(text=...) if content loads slowly")
         return r
 
 
@@ -697,6 +783,17 @@ async def browser_click(selector: str, pin: str = "", timeout: int = 10) -> dict
 async def browser_type(selector: str, text: str, press_enter: bool = False,
                        pin: str = "", timeout: int = 10) -> dict:
     """Type text into a field found by selector, placeholder or label.
+
+    COMPLETION CHECK (how to know it worked):
+    - Returns the filled value state + (if press_enter) url_before / url /
+      navigated / ready_state after auto-waiting for navigation.
+    - ok:true only means "text was typed" — VERIFY with browser_read()
+      (is your text visible in the field/results?).
+    - press_enter=true (e.g. search submit): if navigated==false, results
+      may load in-place via JS -> call browser_wait(text="expected result")
+      then browser_read() again.
+    - If ok:false, call browser_read() to discover the real field
+      placeholder/label, then retry.
 
     Args:
         selector: CSS (e.g. "input[name='search_query']") or placeholder/label text.
@@ -712,8 +809,14 @@ async def browser_type(selector: str, text: str, press_enter: bool = False,
         page = _bw_cur()
         if page is None:
             return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+        url_before = ""
+        try:
+            url_before = page.url
+        except Exception:  # noqa: BLE001
+            pass
         r = await _bw_try_fill(page, selector, text, timeout_ms)
         if not r.get("ok"):
+            r["hint"] = "type found no field — call browser_read() to find the real field name"
             return r
         if press_enter:
             try:
@@ -721,8 +824,16 @@ async def browser_type(selector: str, text: str, press_enter: bool = False,
                 r["pressed_enter"] = True
             except Exception as e:  # noqa: BLE001
                 return {"ok": False, "error": f"typed but Enter failed: {str(e)[:200]}"}
-        info = await _bw_info(page)
-        r.update(info)
+            settled = await _bw_settle(page, url_before=url_before)
+            r.update(settled)
+            r["hint"] = ("navigated after Enter — call browser_read() to verify results"
+                         if r.get("navigated") else
+                         "Enter pressed, same URL — results may render in place; "
+                         "call browser_wait(text=...) then browser_read()")
+        else:
+            info = await _bw_info(page)
+            r.update(info)
+            r["hint"] = "typed, no submit — call browser_read() to confirm field value"
         return r
 
 
@@ -730,6 +841,12 @@ async def browser_type(selector: str, text: str, press_enter: bool = False,
 async def browser_read(selector: str | None = None, pin: str = "",
                        timeout: int = 10, max_chars: int = 8000) -> dict:
     """Return visible page text (default) or one element's text. Use this, NOT screenshots.
+
+    THIS IS YOUR VERIFICATION TOOL — after every browser_click / browser_type
+    / browser_open, call browser_read() to check the task actually completed:
+    is the expected text/link/result visible? If not yet, call
+    browser_wait(text=... or url_contains=...) then browser_read() again.
+    Loop: act -> read -> (wait -> read) until confirmed or timeout.
 
     Args:
         selector: None = whole page; else CSS for one element.
@@ -756,6 +873,104 @@ async def browser_read(selector: str | None = None, pin: str = "",
         txt = (txt or "").strip()[:max_chars]
         return {"ok": True, "url": info["url"], "title": info["title"], "text": txt,
                 "chars": len(txt)}
+
+
+@mcp.tool()
+async def browser_wait(text: str = "", url_contains: str = "", selector: str = "",
+                       pin: str = "", timeout: int = 15) -> dict:
+    """Wait until the page reaches an expected state, then return a snippet.
+
+    USE THIS TO CHECK IF A PREVIOUS ACTION COMPLETED. Standard AI loop:
+      browser_click / browser_type -> browser_wait(...) -> browser_read()
+    to confirm. Polls every 0.5s until ALL given conditions match (AND logic)
+    or timeout. At least one of text / url_contains / selector is required;
+    with none given it just waits for network idle and returns current state.
+
+    Success (ok:true) means the expected state arrived — still call
+    browser_read() for the full text. Timeout (ok:false) is NOT fatal: it
+    returns the CURRENT url/title/snippet so you can decide (retry with
+    different text, browser_read() to see what is there, or give up).
+
+    Args:
+        text: substring to wait for in visible page text (case-insensitive).
+        url_contains: substring to wait for in the URL (e.g. 'results', 'watch?v=').
+        selector: CSS/XPath to wait for (e.g. 'a#video-title', '.result').
+        timeout: max seconds to wait (3-60, default 15).
+    """
+    bad = _need_pin(pin)
+    if bad:
+        return bad
+    text = (text or "").strip()
+    url_contains = (url_contains or "").strip()
+    selector = (selector or "").strip()
+    timeout = max(3, min(int(timeout or 15), 60))
+    if not text and not url_contains and not selector:
+        # No condition: just settle for load and report.
+        async with _bw_lock:
+            page = _bw_cur()
+            if page is None:
+                return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+            settled = await _bw_settle(page, url_before="")
+            try:
+                snippet = (await page.inner_text("body", timeout=5000) or "").strip()[:2000]
+            except Exception:  # noqa: BLE001
+                snippet = ""
+            settled.update({"ok": True, "waited_for": "load-settle (no condition given)",
+                            "snippet": snippet})
+            return settled
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    async with _bw_lock:
+        page = _bw_cur()
+        if page is None:
+            return {"ok": False, "error": "no browser session — call browser_open(url) first"}
+        while True:
+            try:
+                cur_url = page.url
+            except Exception:  # noqa: BLE001
+                cur_url = ""
+            url_ok = (not url_contains) or (url_contains in cur_url)
+            sel_ok = True
+            if selector and url_ok:
+                try:
+                    sel_ok = await page.locator(selector).first.count() > 0
+                except Exception:  # noqa: BLE001
+                    sel_ok = False
+            txt_ok = True
+            body = ""
+            if text and url_ok and sel_ok:
+                try:
+                    body = await page.inner_text("body", timeout=3000) or ""
+                except Exception:  # noqa: BLE001
+                    body = ""
+                txt_ok = text.lower() in body.lower()
+            elif text:
+                txt_ok = False
+            if url_ok and sel_ok and txt_ok:
+                info = await _bw_info(page)
+                try:
+                    snippet = (await page.inner_text("body", timeout=5000) or "").strip()[:2000]
+                except Exception:  # noqa: BLE001
+                    snippet = body[:2000]
+                matched = [k for k, v in (("text", bool(text)), ("url_contains", bool(url_contains)),
+                                          ("selector", bool(selector))) if v]
+                return {"ok": True, "matched": matched, "url": info["url"],
+                        "title": info["title"], "snippet": snippet}
+            if _time.monotonic() >= deadline:
+                info = await _bw_info(page)
+                try:
+                    snippet = (await page.inner_text("body", timeout=3000) or "").strip()[:2000]
+                except Exception:  # noqa: BLE001
+                    snippet = ""
+                return {"ok": False, "error": f"timeout after {timeout}s waiting for "
+                        f"{[k for k, v in (('text=' + text[:40], bool(text)), ('url_contains=' + url_contains[:40], bool(url_contains)), ('selector=' + selector[:40], bool(selector))) if v]}",
+                        "url": info["url"], "title": info["title"], "snippet": snippet,
+                        "hint": "state not reached — call browser_read() for full text, "
+                                "then retry with different text/selector or click again"}
+            try:
+                await page.wait_for_timeout(500)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 @mcp.tool()
@@ -801,6 +1016,11 @@ async def browser_screenshot(pin: str = "", max_width: int = 800):
 async def browser_eval(js: str, pin: str = "", timeout: int = 10) -> dict:
     """Run JavaScript on the page and return the result.
 
+    ALSO USEFUL AS A COMPLETION PROBE: e.g. js="document.readyState" should
+    be "complete"; js="document.body.innerText.slice(0,500)" for a quick
+    check; js="document.querySelectorAll('a').length" to confirm results
+    rendered. For waiting, prefer browser_wait() over polling eval yourself.
+
     Args:
         js: JS snippet, e.g. "document.title" or "() => document.querySelectorAll('a').length".
         timeout: seconds (default 10).
@@ -833,6 +1053,10 @@ async def browser_eval(js: str, pin: str = "", timeout: int = 10) -> dict:
 async def browser_tabs(action: str = "list", index: int | None = None,
                        url: str = "", pin: str = "") -> dict:
     """List, switch, close or open tabs in the persistent session.
+
+    After action='new' with a URL or action='switch', VERIFY with
+    browser_read() (or browser_wait() if the tab loads slowly) — the
+    returned url/title are post-navigation but JS may still be rendering.
 
     Args:
         action: 'list' (default), 'switch', 'close', 'new'.
