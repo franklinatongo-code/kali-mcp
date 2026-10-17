@@ -4,6 +4,7 @@ backup/
 .pin
 .token
 .tunnel-url
+.sudo-pass
 *.log
 *.pid
 .kali-mcp.pid

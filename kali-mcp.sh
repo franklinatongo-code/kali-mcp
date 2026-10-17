@@ -136,7 +136,7 @@ do_start_tunnel() {
   echo $! > "$TPIDF"
   local url="" i
   for ((i=0; i<30; i++)); do
-    url="$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$TLOG" 2>/dev/null | tail -n 1 || true)"
+    url="$(grep -o 'https://[a-z0-9-]*\.trycloudflare\.com' "$TLOG" 2>/dev/null | grep -v '^https://api\.trycloudflare\.com$' | tail -n 1 || true)"
     [[ -n "$url" ]] && break
     sleep 2
   done

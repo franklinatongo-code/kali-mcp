@@ -45,39 +45,6 @@ mcp = FastMCP("kali")
 
 WORKSPACE = Path.home() / "Desktop"
 
-# ── control PIN (for state-changing / remote-control tools) ────────────
-# The MCP connection itself may be open-registration (Claude OAuth shim),
-# so dangerous tools take a second secret as an ARGUMENT. Read-only tools
-# stay PIN-free. PIN lives in .pin (600) next to this file; override with
-# env KALI_MCP_PIN.
-def _load_pin() -> str:
-    env_pin = os.environ.get("KALI_MCP_PIN", "").strip()
-    if env_pin:
-        return env_pin
-    pinfile = Path(__file__).resolve().parent / ".pin"
-    try:
-        if pinfile.is_file() and pinfile.stat().st_size > 0:
-            return pinfile.read_text().strip()
-        pin = secrets.token_urlsafe(18)
-        pinfile.write_text(pin + "\n")
-        try:
-            pinfile.chmod(0o600)
-        except Exception:  # noqa: BLE001
-            pass
-        print(f"[kali-mcp] generated control PIN: {pin}  (saved to {pinfile})", flush=True)
-        return pin
-    except Exception:  # noqa: BLE001
-        return ""
-
-
-CONTROL_PIN = _load_pin()
-
-
-def _need_pin(pin: str = "") -> dict | None:
-    """PIN gate DISABLED by user request — all tools open (DANGEROUS with tunnel)."""
-    return None
-
-
 def _gui_env() -> dict:
     """Env needed to touch the graphical session (Wayland) from a daemon."""
     uid = os.geteuid()
@@ -95,6 +62,8 @@ def _gui_env() -> dict:
                 break
         else:
             env.setdefault("WAYLAND_DISPLAY", "wayland-1")
+    if os.path.exists("/tmp/.ydotool_socket"):
+        env["YDOTOOL_SOCKET"] = "/tmp/.ydotool_socket"
     return env
 
 
@@ -220,7 +189,8 @@ DENY_RES = (
 
 
 @mcp.tool()
-def terminal(command: str, pin: str = "", timeout: int = 60, workdir: str = "") -> dict:
+def terminal(command: str, timeout: int = 60, workdir: str = "", sudo: bool = False,
+             sudo_password: str = "") -> dict:
     """Run a shell command on the PC and return its output.
 
     WEB BROWSING RULE: NEVER use this for websites — no xdg-open, no
@@ -234,15 +204,14 @@ def terminal(command: str, pin: str = "", timeout: int = 60, workdir: str = "") 
         command: bash command to run (as the desktop user, NOT root).
         timeout: seconds (10-300, default 60).
         workdir: optional working directory (default: home).
+        sudo: if True, run with sudo.
+        sudo_password: password for sudo (passed via stdin, not shown in logs).
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     import re as _re
     for pat in DENY_RES:
         if _re.search(pat, command, _re.IGNORECASE):
             return {"ok": False, "error": f"refused by safety filter ({pat[:24]}…). "
-                                          "If you really mean it, run it locally."}
+                                           "If you really mean it, run it locally."}
     timeout = max(10, min(int(timeout or 60), 300))
     cwd = os.path.expanduser("~")
     if workdir:
@@ -252,10 +221,24 @@ def terminal(command: str, pin: str = "", timeout: int = 60, workdir: str = "") 
         if not p.is_dir():
             return {"ok": False, "error": f"workdir not a directory: {workdir}"}
         cwd = str(p)
+    if sudo:
+        if not sudo_password:
+            try:
+                pf = Path(__file__).resolve().parent / ".sudo-pass"
+                if pf.is_file() and pf.stat().st_size > 0:
+                    sudo_password = pf.read_text().strip()
+            except Exception:  # noqa: BLE001
+                pass
+        if sudo_password:
+            command = f"sudo -S {command}"
+        else:
+            command = f"sudo {command}"
     try:
         print(f"[terminal] exec (timeout={timeout}s, cwd={cwd}): {command[:200]}", flush=True)
+        stdin_data = (sudo_password + "\n") if (sudo and sudo_password) else None
         p = subprocess.run(command, shell=True, cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout, executable="/bin/bash", env=_gui_env())
+                           timeout=timeout, executable="/bin/bash", env=_gui_env(),
+                           input=stdin_data)
         out = (p.stdout or "") + (("\n[stderr]\n" + p.stderr) if p.stderr else "")
         out = out.strip()[:12000] or f"(exit {p.returncode}, no output)"
         return {"ok": p.returncode == 0, "exit_code": p.returncode, "output": out}
@@ -332,7 +315,7 @@ def list_apps(search: str = "") -> dict:
 
 
 @mcp.tool()
-def open_app(query: str, pin: str = "") -> dict:
+def open_app(query: str) -> dict:
     """Open/launch a GUI app on the PC.
 
     NOT FOR WEBSITES: to visit a URL use browser_open(url), never
@@ -342,9 +325,6 @@ def open_app(query: str, pin: str = "") -> dict:
     Args:
         query: fuzzy app name, e.g. 'firefox', 'files', 'terminal', 'code'.
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     apps = _desktop_apps()
     q = _norm(query)
     if not q:
@@ -380,16 +360,13 @@ def open_app(query: str, pin: str = "") -> dict:
 
 
 @mcp.tool()
-def screenshot(pin: str = "", max_width: int = 1280):
+def screenshot(max_width: int = 1280):
     """Take a screenshot of the PC display. Returns a PNG image.
 
     Args:
         max_width: downscale to this width (default 1280, keeps phone-sized replies fast).
     """
     from mcp.types import ImageContent, TextContent
-    bad = _need_pin(pin)
-    if bad:
-        return bad["error"]
     if not shutil.which("grim"):
         return "screenshot needs the 'grim' tool (not installed)"
     import base64
@@ -418,14 +395,11 @@ def screenshot(pin: str = "", max_width: int = 1280):
 
 
 @mcp.tool()
-def notify(title: str, message: str = "", pin: str = "") -> dict:
+def notify(title: str, message: str = "") -> dict:
     """Pop a desktop notification on the PC.
 
     Needs a notification daemon in the desktop session; errors clearly if none.
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     try:
         subprocess.run(["notify-send", title[:100], message[:500]],
                        env=_gui_env(), timeout=8, capture_output=True, check=True)
@@ -438,16 +412,13 @@ def notify(title: str, message: str = "", pin: str = "") -> dict:
 
 
 @mcp.tool()
-def clipboard(text: str = "", pin: str = "") -> dict:
+def clipboard(text: str = "") -> dict:
     """Read (no text) or set the PC clipboard.
 
     Args:
         text: if given, copies it to the clipboard; if empty, reads it.
     """
     if text:
-        bad = _need_pin(pin)
-        if bad:
-            return bad
         try:
             subprocess.run(["wl-copy"], input=text, text=True, env=_gui_env(), timeout=10)
             return {"ok": True, "copied_chars": len(text)}
@@ -460,11 +431,8 @@ def clipboard(text: str = "", pin: str = "") -> dict:
 
 
 @mcp.tool()
-def media(action: str, pin: str = "") -> dict:
+def media(action: str) -> dict:
     """Media keys on the PC: play-pause, next, previous, stop, volume-up, volume-down."""
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     mapping = {"play-pause": ["play-pause"], "next": ["next"], "previous": ["previous"],
                "stop": ["stop"], "volume-up": ["volume", "5%+"],
                "volume-down": ["volume", "5%-"]}
@@ -474,12 +442,155 @@ def media(action: str, pin: str = "") -> dict:
 
 
 @mcp.tool()
-def lock_screen(pin: str = "") -> dict:
+def lock_screen() -> dict:
     """Lock the PC screen."""
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     return _run(["loginctl", "lock-session"])
+
+
+@mcp.tool()
+def screenshot_window(window: str = "active", max_width: int = 1280):
+    """Take a screenshot of a specific window (not the full screen).
+
+    Args:
+        window: 'active' (default) for the focused window, or a substring to match
+                a window class/title (e.g. 'firefox', 'terminal').
+        max_width: downscale to this width (default 1280).
+    """
+    from mcp.types import ImageContent
+    if not shutil.which("grim"):
+        return "screenshot needs the 'grim' tool (not installed)"
+    if not shutil.which("hyprctl"):
+        return "window screenshot needs Hyprland (hyprctl not found)"
+    import base64
+    import tempfile
+    tmp = ""
+    try:
+        r = _run(["hyprctl", "clients"], timeout=10)
+        if not r.get("ok"):
+            return {"ok": False, "error": f"hyprctl failed: {r.get('error', '')}"}
+        windows = []
+        current = None
+        for line in r["output"].splitlines():
+            if line.startswith("Window"):
+                if current:
+                    windows.append(current)
+                current = {"raw": line}
+            elif current is not None and ":" in line:
+                key, _, val = line.partition(":")
+                current[key.strip().lower()] = val.strip()
+        if current:
+            windows.append(current)
+        target = None
+        if window == "active":
+            r2 = _run(["hyprctl", "activewindow"], timeout=10)
+            pos = size = ""
+            if r2.get("ok"):
+                for line in r2["output"].splitlines():
+                    if line.lower().startswith("at:"):
+                        pos = line.split(":", 1)[1].strip()
+                    elif line.lower().startswith("size:"):
+                        size = line.split(":", 1)[1].strip()
+                if pos and size:
+                    target = f"{pos} {size.replace(',', 'x')}"
+            if not target:
+                for w in windows:
+                    if w.get("focusHistoryID") == "0":
+                        target = f"{w.get('at', '')} {w.get('size', '').replace(',', 'x')}"
+                        break
+        else:
+            q = window.lower()
+            for w in windows:
+                cls = w.get("class", "").lower()
+                title = w.get("title", "").lower()
+                if q in cls or q in title:
+                    target = f"{w.get('at', '')} {w.get('size', '').replace(',', 'x')}"
+                    break
+        tmp = tempfile.mktemp(suffix=".png")
+        if target:
+            r3 = subprocess.run(["grim", "-g", target, "-t", "png", tmp],
+                                env=_gui_env(), capture_output=True, timeout=30)
+            if r3.returncode != 0 or not Path(tmp).is_file():
+                Path(tmp).unlink(missing_ok=True)
+                tmp = tempfile.mktemp(suffix=".png")
+                subprocess.run(["grim", "-t", "png", tmp], env=_gui_env(),
+                               capture_output=True, timeout=30)
+        else:
+            subprocess.run(["grim", "-t", "png", tmp], env=_gui_env(),
+                           capture_output=True, timeout=30)
+        if not Path(tmp).is_file():
+            return {"ok": False, "error": "grim failed to produce a screenshot"}
+        data = Path(tmp).read_bytes()
+        if max_width and shutil.which("convert"):
+            small = tmp + ".small.png"
+            subprocess.run(["convert", tmp, "-resize", f"{int(max_width)}x>", small],
+                           timeout=30, capture_output=True)
+            if Path(small).is_file():
+                data = Path(small).read_bytes()
+                Path(small).unlink(missing_ok=True)
+        return ImageContent(type="image",
+                            data=base64.b64encode(data).decode(),
+                            mimeType="image/png")
+    except Exception as e:  # noqa: BLE001
+        return f"screenshot_window failed: {e}"
+    finally:
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
+
+
+@mcp.tool()
+def keyboard_type(text: str) -> dict:
+    """Type text using ydotool (works on Wayland).
+
+    Args:
+        text: text to type.
+    """
+    if not shutil.which("ydotool"):
+        return {"ok": False, "error": "ydotool not installed (sudo apt install ydotool)"}
+    return _run(["ydotool", "type", "--", text], timeout=30)
+
+
+@mcp.tool()
+def keyboard_key(keys: str) -> dict:
+    """Press a key or key combination using ydotool.
+
+    Args:
+        keys: key combo like 'ctrl+c', 'alt+Tab', 'Return', 'super+Return'.
+    """
+    if not shutil.which("ydotool"):
+        return {"ok": False, "error": "ydotool not installed (sudo apt install ydotool)"}
+    return _run(["ydotool", "key"] + keys.split("+"), timeout=10)
+
+
+@mcp.tool()
+def mouse_move(x: int, y: int, relative: bool = True) -> dict:
+    """Move the mouse cursor using ydotool (relative by default — avoids cursor disappearing on Hyprland).
+
+    Args:
+        x: relative X delta (or absolute if relative=False).
+        y: relative Y delta (or absolute if relative=False).
+        relative: if True (default), move by (x, y). If False, move to (x, y).
+    """
+    if not shutil.which("ydotool"):
+        return {"ok": False, "error": "ydotool not installed (sudo apt install ydotool)"}
+    if relative:
+        return _run(["ydotool", "mousemove", "-x", str(x), "-y", str(y)], timeout=10)
+    _run(["ydotool", "mousemove", "-a", "-x", str(x), "-y", str(y)], timeout=10)
+    return _run(["ydotool", "mousemove", "-x", "1", "-y", "0"], timeout=10)
+
+
+@mcp.tool()
+def mouse_click(button: str = "left") -> dict:
+    """Click the mouse using ydotool.
+
+    Args:
+        button: 'left' (default), 'right', or 'middle'.
+    """
+    if not shutil.which("ydotool"):
+        return {"ok": False, "error": "ydotool not installed (sudo apt install ydotool)"}
+    btn_map = {"left": "0xC0", "right": "0xC1", "middle": "0xC2"}
+    if button not in btn_map:
+        return {"ok": False, "error": f"unknown button '{button}' — pick left/right/middle"}
+    return _run(["ydotool", "click", btn_map[button]], timeout=10)
 
 
 # ── browser-control tools (PIN-gated, persistent Playwright Firefox) ────
@@ -680,7 +791,7 @@ async def _bw_try_fill(page, selector: str, text: str, timeout_ms: int) -> dict:
 
 
 @mcp.tool()
-async def browser_open(url: str, headless: bool = False, pin: str = "", timeout: int = 30) -> dict:
+async def browser_open(url: str, headless: bool = False, timeout: int = 30) -> dict:
     """Start the persistent browser session if needed and go to the URL.
 
     USE THIS FOR ALL WEB TASKS — never terminal xdg-open / firefox / chrome
@@ -699,9 +810,6 @@ async def browser_open(url: str, headless: bool = False, pin: str = "", timeout:
         headless: False = visible window (default), True = no window.
         timeout: seconds (10-120, default 30).
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     timeout = max(10, min(int(timeout or 30), 120))
     url = (url or "").strip()
     if not url:
@@ -734,7 +842,7 @@ async def browser_open(url: str, headless: bool = False, pin: str = "", timeout:
 
 
 @mcp.tool()
-async def browser_click(selector: str, pin: str = "", timeout: int = 10) -> dict:
+async def browser_click(selector: str, timeout: int = 10) -> dict:
     """Click an element by CSS/XPath selector or by its visible text.
 
     COMPLETION CHECK (how to know it worked):
@@ -753,9 +861,6 @@ async def browser_click(selector: str, pin: str = "", timeout: int = 10) -> dict
         selector: CSS/XPath (e.g. 'a#video-title', 'input[name=search]') or text ('Accept all').
         timeout: seconds per attempt (default 10).
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     timeout_ms = max(1, min(int(timeout or 10), 60)) * 1000
     async with _bw_lock:
         page = _bw_cur()
@@ -780,8 +885,7 @@ async def browser_click(selector: str, pin: str = "", timeout: int = 10) -> dict
 
 
 @mcp.tool()
-async def browser_type(selector: str, text: str, press_enter: bool = False,
-                       pin: str = "", timeout: int = 10) -> dict:
+async def browser_type(selector: str, text: str, press_enter: bool = False, timeout: int = 10) -> dict:
     """Type text into a field found by selector, placeholder or label.
 
     COMPLETION CHECK (how to know it worked):
@@ -801,9 +905,6 @@ async def browser_type(selector: str, text: str, press_enter: bool = False,
         press_enter: press Enter after typing (e.g. submit a search).
         timeout: seconds (default 10).
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     timeout_ms = max(1, min(int(timeout or 10), 60)) * 1000
     async with _bw_lock:
         page = _bw_cur()
@@ -838,7 +939,7 @@ async def browser_type(selector: str, text: str, press_enter: bool = False,
 
 
 @mcp.tool()
-async def browser_read(selector: str | None = None, pin: str = "",
+async def browser_read(selector: str | None = None,
                        timeout: int = 10, max_chars: int = 8000) -> dict:
     """Return visible page text (default) or one element's text. Use this, NOT screenshots.
 
@@ -853,9 +954,6 @@ async def browser_read(selector: str | None = None, pin: str = "",
         timeout: seconds (default 10).
         max_chars: truncate (default 8000).
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     timeout_ms = max(1, min(int(timeout or 10), 60)) * 1000
     max_chars = max(500, min(int(max_chars or 8000), 20000))
     async with _bw_lock:
@@ -876,8 +974,7 @@ async def browser_read(selector: str | None = None, pin: str = "",
 
 
 @mcp.tool()
-async def browser_wait(text: str = "", url_contains: str = "", selector: str = "",
-                       pin: str = "", timeout: int = 15) -> dict:
+async def browser_wait(text: str = "", url_contains: str = "", selector: str = "", timeout: int = 15) -> dict:
     """Wait until the page reaches an expected state, then return a snippet.
 
     USE THIS TO CHECK IF A PREVIOUS ACTION COMPLETED. Standard AI loop:
@@ -897,9 +994,6 @@ async def browser_wait(text: str = "", url_contains: str = "", selector: str = "
         selector: CSS/XPath to wait for (e.g. 'a#video-title', '.result').
         timeout: max seconds to wait (3-60, default 15).
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     text = (text or "").strip()
     url_contains = (url_contains or "").strip()
     selector = (selector or "").strip()
@@ -974,16 +1068,13 @@ async def browser_wait(text: str = "", url_contains: str = "", selector: str = "
 
 
 @mcp.tool()
-async def browser_screenshot(pin: str = "", max_width: int = 800):
+async def browser_screenshot(max_width: int = 800):
     """Take a PNG of the current page. Only when asked — prefer browser_read.
 
     Args:
         max_width: downscale width (default 800, 0 = full size).
     """
     from mcp.types import ImageContent
-    bad = _need_pin(pin)
-    if bad:
-        return bad["error"]
     async with _bw_lock:
         page = _bw_cur()
         if page is None:
@@ -1013,7 +1104,7 @@ async def browser_screenshot(pin: str = "", max_width: int = 800):
 
 
 @mcp.tool()
-async def browser_eval(js: str, pin: str = "", timeout: int = 10) -> dict:
+async def browser_eval(js: str, timeout: int = 10) -> dict:
     """Run JavaScript on the page and return the result.
 
     ALSO USEFUL AS A COMPLETION PROBE: e.g. js="document.readyState" should
@@ -1025,9 +1116,6 @@ async def browser_eval(js: str, pin: str = "", timeout: int = 10) -> dict:
         js: JS snippet, e.g. "document.title" or "() => document.querySelectorAll('a').length".
         timeout: seconds (default 10).
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     js = js or ""
     if len(js) > 4000:
         return {"ok": False, "error": "js too long (max 4000 chars)"}
@@ -1051,7 +1139,7 @@ async def browser_eval(js: str, pin: str = "", timeout: int = 10) -> dict:
 
 @mcp.tool()
 async def browser_tabs(action: str = "list", index: int | None = None,
-                       url: str = "", pin: str = "") -> dict:
+                       url: str = "") -> dict:
     """List, switch, close or open tabs in the persistent session.
 
     After action='new' with a URL or action='switch', VERIFY with
@@ -1063,9 +1151,6 @@ async def browser_tabs(action: str = "list", index: int | None = None,
         index: tab index for switch/close.
         url: URL for 'new' (blank tab if empty).
     """
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     global _bw_current
     action = (action or "list").strip().lower()
     async with _bw_lock:
@@ -1128,11 +1213,8 @@ async def browser_tabs(action: str = "list", index: int | None = None,
 
 
 @mcp.tool()
-async def browser_close(pin: str = "") -> dict:
+async def browser_close() -> dict:
     """Shut the persistent browser session down."""
-    bad = _need_pin(pin)
-    if bad:
-        return bad
     global _bw_play, _bw_browser, _bw_context, _bw_pages, _bw_current, _bw_headless
     async with _bw_lock:
         n = len(_bw_pages)
